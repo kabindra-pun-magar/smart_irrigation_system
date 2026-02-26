@@ -1,0 +1,120 @@
+full code 
+
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <DHT.h>
+
+// ===== DHT Setup =====
+#define DHTPIN 4
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
+
+// ===== Analog Sensors =====
+#define MOISTURE_PIN 34
+#define RAIN_PIN 35
+
+// ===== WiFi =====
+const char* ssid = "SREC";
+const char* password = "";
+
+// ===== Flask Server =====
+String serverName = "http://10.0.6.47:5000/predict";
+
+void setup() {
+  Serial.begin(115200);
+
+  dht.begin();
+  pinMode(MOISTURE_PIN, INPUT);
+  pinMode(RAIN_PIN, INPUT);
+
+  Serial.println("Connecting to WiFi...");
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nWiFi Connected!");
+  Serial.print("ESP32 IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+void loop() {
+
+  // ===== Read DHT =====
+  float temperature = dht.readTemperature();
+  float humidity = dht.readHumidity();
+
+  if (isnan(temperature) || isnan(humidity)) {
+    Serial.println("❌ DHT Read Failed");
+    delay(3000);
+    return;
+  }
+
+  float humidity_temp_ratio = humidity / temperature;
+
+  // ===== Read Moisture =====
+  int moistureRaw = analogRead(MOISTURE_PIN);
+  float moisturePercent = map(moistureRaw, 4095, 1500, 0, 100);
+  moisturePercent = constrain(moisturePercent, 0, 100);
+
+  // ===== Read Rain =====
+  int rainRaw = analogRead(RAIN_PIN);
+  float rainPercent = map(rainRaw, 4095, 1500, 0, 100);
+  rainPercent = constrain(rainPercent, 0, 100);
+
+  // ===== Print All Sensor Data =====
+  Serial.println("------ SENSOR DATA ------");
+  Serial.printf("Temp: %.2f C | Humidity: %.2f %%\n", temperature, humidity);
+  Serial.printf("Soil Moisture: %.2f %% (Raw: %d)\n", moisturePercent, moistureRaw);
+  Serial.printf("Rain: %.2f %% (Raw: %d)\n", rainPercent, rainRaw);
+
+  if (WiFi.status() == WL_CONNECTED) {
+
+    HTTPClient http;
+    http.begin(serverName);
+    http.addHeader("Content-Type", "application/json");
+
+    String jsonData = "{";
+    jsonData += "\"nitrogen\":40,";
+    jsonData += "\"phosphorus\":30,";
+    jsonData += "\"potassium\":35,";
+    jsonData += "\"ph\":6.5,";
+    jsonData += "\"humidity\":" + String(humidity) + ",";
+    jsonData += "\"rainfall\":" + String(rainPercent) + ",";
+    jsonData += "\"soil_moisture\":" + String(moisturePercent) + ",";
+    jsonData += "\"wind_speed\":2.5,";
+    jsonData += "\"solar_radiation\":350,";
+    jsonData += "\"rainfall_last3\":0,";
+    jsonData += "\"humidity_temp_ratio\":" + String(humidity_temp_ratio) + ",";
+    jsonData += "\"ph_normalized\":1.0";
+    jsonData += "}";
+
+    Serial.println("Sending JSON:");
+    Serial.println(jsonData);
+
+    int httpResponseCode = http.POST(jsonData);
+
+    if (httpResponseCode > 0) {
+
+      String response = http.getString();
+      Serial.println("Server Response:");
+      Serial.println(response);
+
+      if (response.indexOf("\"irrigation_needed\":1") >= 0) {
+        Serial.println("💧 WATER ON");
+      } else {
+        Serial.println("🌿 WATER OFF");
+      }
+
+    } else {
+      Serial.print("HTTP Error: ");
+      Serial.println(httpResponseCode);
+    }
+
+    http.end();
+  }
+
+  delay(10000);  // 10 seconds (DON'T reduce)
+}
