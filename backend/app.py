@@ -1,49 +1,41 @@
-"""
-Smart Irrigation System - Flask Backend
-AUTO / MANUAL Mode Supported
-"""
-
-from flask import Flask, request, jsonify, render_template
+import os
 import joblib
 import numpy as np
-import os
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from openai import OpenAI
 
 app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # ==============================
-# GLOBAL SYSTEM STATE
+# GLOBAL STATE
 # ==============================
 
 latest_data = {
-    "temperature": 0,
-    "humidity": 0,
-    "soil_moisture": 0,
+    "temperature": 25,
+    "humidity": 50,
+    "soil_moisture": 40,
     "irrigation_needed": 0,
     "mode": "AUTO"
 }
 
-mode = "AUTO"        # AUTO or MANUAL
-manual_state = 0     # 0 = OFF, 1 = ON
+manual_state = 0  # 0 = OFF, 1 = ON
 
 # ==============================
-# LOAD MODEL
+# MODEL
 # ==============================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "..", "model", "irrigation_model.pkl")
-MODEL_PATH = os.path.normpath(MODEL_PATH)
+MODEL_PATH = os.path.normpath(os.path.join(BASE_DIR, "..", "model", "irrigation_model.pkl"))
 
 model = None
-
-try:
-    if os.path.exists(MODEL_PATH):
+if os.path.exists(MODEL_PATH):
+    try:
         model = joblib.load(MODEL_PATH)
-        print("✅ Model loaded")
-    else:
-        print("⚠️ Model not found")
-except Exception as e:
-    print("❌ Model loading error:", e)
-
+        print("✅ Model Loaded")
+    except Exception as e:
+        print("❌ Model Error:", e)
 
 # ==============================
 # ROUTES
@@ -53,90 +45,61 @@ except Exception as e:
 def home():
     return jsonify({"status": "API running"})
 
-
-@app.route('/dashboard')
-def dashboard():
-    return render_template("dashboard.html")
-
-
-@app.route('/latest')
-def latest():
+@app.route('/latest', methods=['GET'])
+def get_latest():
     return jsonify(latest_data)
 
-
+# ✅ MODE SWITCH
 @app.route('/set_mode', methods=['POST'])
 def set_mode():
-    global mode
+    global latest_data
     data = request.get_json()
-    mode = data.get("mode", "AUTO")
-    latest_data["mode"] = mode
-    return jsonify({"mode": mode})
+    latest_data["mode"] = data.get("mode", "AUTO")
+    return jsonify({"mode": latest_data["mode"]})
 
-
+# ✅ MANUAL CONTROL (FIXED)
 @app.route('/set_manual', methods=['POST'])
 def set_manual():
     global manual_state
     data = request.get_json()
+
     manual_state = int(data.get("state", 0))
+
+    print(f"🔧 Manual State Updated: {manual_state}")
+
     return jsonify({"manual_state": manual_state})
 
+# ==============================
+# PREDICT
+# ==============================
 
 @app.route('/predict', methods=['POST'])
 def predict():
+    global latest_data, manual_state
 
-    global latest_data
+    data = request.get_json()
 
-    data = request.get_json(force=True)
+    latest_data["temperature"] = float(data.get("temperature", 25))
+    latest_data["humidity"] = float(data.get("humidity", 50))
+    latest_data["soil_moisture"] = float(data.get("soil_moisture", 40))
 
-    temperature = data.get("temperature", 0)
-    humidity = data.get("humidity", 0)
-    soil_moisture = data.get("soil_moisture", 0)
+    # ==========================
+    # LOGIC FIX
+    # ==========================
 
-    nitrogen = data.get('nitrogen', 0)
-    phosphorus = data.get('phosphorus', 0)
-    potassium = data.get('potassium', 0)
-    ph = data.get('ph', 7.0)
-    rainfall = data.get('rainfall', 0)
-    wind_speed = data.get('wind_speed', 0)
-    solar_radiation = data.get('solar_radiation', 0)
-    rainfall_last3 = data.get('rainfall_last3', 0)
-    humidity_temp_ratio = data.get('humidity_temp_ratio', 0)
-    ph_normalized = data.get('ph_normalized', 1.0)
+    if latest_data["mode"] == "MANUAL":
+        latest_data["irrigation_needed"] = manual_state
 
-    features = np.array([[
-        nitrogen,
-        phosphorus,
-        potassium,
-        ph,
-        humidity,
-        rainfall,
-        wind_speed,
-        solar_radiation,
-        rainfall_last3,
-        humidity_temp_ratio,
-        ph_normalized
-    ]])
+    else:  # AUTO
+        if model:
+            features = np.array([[0, 0, 0, 7, latest_data["humidity"], 0, 0, 0, 0, 0, 1]])
+            latest_data["irrigation_needed"] = int(model.predict(features)[0])
+        else:
+            latest_data["irrigation_needed"] = 1 if latest_data["soil_moisture"] < 30 else 0
 
-    ml_prediction = model.predict(features)[0] if model else 0
+    return jsonify(latest_data)
 
-    if mode == "AUTO":
-        irrigation = int(ml_prediction)
-    else:
-        irrigation = manual_state
+# ==============================
 
-    latest_data = {
-        "temperature": temperature,
-        "humidity": humidity,
-        "soil_moisture": soil_moisture,
-        "irrigation_needed": irrigation,
-        "mode": mode
-    }
-
-    return jsonify({
-        "irrigation_needed": irrigation,
-        "mode": mode
-    })
-
-
-if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=5000, debug=False)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
