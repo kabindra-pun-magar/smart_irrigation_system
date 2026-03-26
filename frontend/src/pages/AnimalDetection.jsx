@@ -1,50 +1,23 @@
 import React, { useState, useRef, useEffect } from "react";
 import "../styles/AnimalDetection.css";
 
+const BASE_URL = process.env.REACT_APP_DETECTION_API_URL || "http://127.0.0.1:5001";
+const DETECTION_INTERVAL = 3000; // 3 seconds (recommended by backend)
+
 export default function AnimalDetection() {
   const [isLive, setIsLive] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [cameraError, setCameraError] = useState(null);
+  
   const [detectionStatus, setDetectionStatus] = useState({
     active: false,
     currentAnimal: null,
     confidence: 0,
-    lastDetection: null
+    lastDetection: null,
+    imageData: null
   });
   
-  const [detections, setDetections] = useState([
-    {
-      id: 1,
-      timestamp: "2024-03-25 10:30:25",
-      animal: "Cow 🐄",
-      confidence: 94,
-      action: "Alert + Buzzer",
-      image: null
-    },
-    {
-      id: 2,
-      timestamp: "2024-03-25 08:15:12",
-      animal: "Dog 🐕",
-      confidence: 87,
-      action: "Alert + Light",
-      image: null
-    },
-    {
-      id: 3,
-      timestamp: "2024-03-24 19:45:30",
-      animal: "Goat 🐐",
-      confidence: 91,
-      action: "Alert + Buzzer",
-      image: null
-    },
-    {
-      id: 4,
-      timestamp: "2024-03-24 06:20:15",
-      animal: "Wild Boar 🐗",
-      confidence: 78,
-      action: "Alert + Buzzer + Light",
-      image: null
-    }
-  ]);
-
+  const [detections, setDetections] = useState([]);
   const [settings, setSettings] = useState({
     sensitivity: 70,
     confidenceThreshold: 75,
@@ -56,96 +29,301 @@ export default function AnimalDetection() {
     nightMode: false
   });
 
-  const [alerts, setAlerts] = useState([
-    {
-      id: 1,
-      type: "critical",
-      message: "Cow detected in Field A!",
-      time: "10:30 AM",
-      read: false
-    },
-    {
-      id: 2,
-      type: "warning",
-      message: "Dog detected near crops",
-      time: "08:15 AM",
-      read: false
-    },
-    {
-      id: 3,
-      type: "info",
-      message: "Detection system activated",
-      time: "07:00 AM",
-      read: true
-    }
-  ]);
-
+  const [alerts, setAlerts] = useState([]);
   const [stats, setStats] = useState({
-    totalDetections: 47,
-    uniqueAnimals: 5,
-    todayDetections: 12,
-    falseAlarms: 3
+    totalDetections: 0,
+    uniqueAnimals: 0,
+    todayDetections: 0,
+    falseAlarms: 0
   });
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const intervalRef = useRef(null);
+  const lastFrameTimeRef = useRef(Date.now());
 
-  // Simulate live video feed
-  useEffect(() => {
-    let interval;
-    if (isLive) {
-      interval = setInterval(() => {
-        // Simulate random detection
-        const animals = ["Cow 🐄", "Goat 🐐", "Dog 🐕", "Wild Boar 🐗"];
-        const randomAnimal = animals[Math.floor(Math.random() * animals.length)];
-        const confidence = Math.floor(Math.random() * (95 - 70 + 1) + 70);
-        
-        setDetectionStatus({
-          active: true,
-          currentAnimal: randomAnimal,
-          confidence: confidence,
-          lastDetection: new Date().toLocaleTimeString()
-        });
-      }, 5000);
-    }
-    return () => clearInterval(interval);
-  }, [isLive]);
+  // Helper: Format animal name with emoji
+  const formatAnimalName = (animal) => {
+    const icons = {
+      'cow': '🐄',
+      'dog': '🐕',
+      'sheep': '🐑',
+      'horse': '🐎',
+      'elephant': '🐘',
+      'bird': '🐦',
+      'cat': '🐱',
+      'bear': '🐻',
+      'zebra': '🦓',
+      'giraffe': '🦒'
+    };
+    const animalLower = animal.toLowerCase();
+    return `${icons[animalLower] || '🦊'} ${animal.charAt(0).toUpperCase() + animal.slice(1)}`;
+  };
 
-  const startDetection = () => {
-    setIsLive(true);
-    // Add system message
+  // Add detection to history
+  const addToHistory = (detection) => {
+    const newDetection = {
+      id: Date.now(),
+      timestamp: new Date().toLocaleString(),
+      animal: formatAnimalName(detection.class),
+      confidence: detection.confidence,
+      action: getDeterrentAction(detection.confidence),
+      image: detectionStatus.imageData
+    };
+    setDetections(prev => [newDetection, ...prev.slice(0, 49)]); // Keep last 50
+  };
+
+  // Add alert
+  const addAlert = (detection) => {
     const newAlert = {
       id: Date.now(),
-      type: "info",
-      message: "Animal detection system activated",
+      type: detection.confidence > 85 ? "critical" : "warning",
+      message: `🚨 ${formatAnimalName(detection.class)} detected! Confidence: ${detection.confidence}%`,
       time: new Date().toLocaleTimeString(),
       read: false
     };
-    setAlerts([newAlert, ...alerts]);
+    setAlerts(prev => [newAlert, ...prev.slice(0, 19)]); // Keep last 20
+  };
+
+  // Get deterrent action
+  const getDeterrentAction = (confidence) => {
+    const actions = [];
+    if (settings.enableBuzzer) actions.push("Buzzer");
+    if (settings.enableLight) actions.push("Light");
+    if (settings.enableSpeaker) actions.push("Speaker");
+    return actions.join(" + ") || "Alert";
+  };
+
+  // Trigger deterrent
+  const triggerDeterrent = async (animal) => {
+    try {
+      await fetch(`${BASE_URL}/trigger_deterrent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          animal: animal,
+          actions: {
+            buzzer: settings.enableBuzzer,
+            light: settings.enableLight,
+            speaker: settings.enableSpeaker
+          }
+        })
+      });
+    } catch (error) {
+      console.error("Failed to trigger deterrent:", error);
+    }
+  };
+
+  // Optimized capture and detect function
+  const captureAndDetect = async () => {
+    if (!videoRef.current || !canvasRef.current || isProcessing) return;
+    
+    // Frame rate limiting
+    const now = Date.now();
+    if (now - lastFrameTimeRef.current < DETECTION_INTERVAL) return;
+    lastFrameTimeRef.current = now;
+    
+    setIsProcessing(true);
+    
+    try {
+      const canvas = canvasRef.current;
+      const context = canvas.getContext('2d');
+      
+      // Use smaller canvas for better performance
+      const targetWidth = 640;
+      const targetHeight = 480;
+      
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+      
+      // Draw and resize in one step
+      context.drawImage(
+        videoRef.current, 
+        0, 0, 
+        videoRef.current.videoWidth, 
+        videoRef.current.videoHeight,
+        0, 0, 
+        targetWidth, 
+        targetHeight
+      );
+      
+      // Compress image to reduce payload size
+      const imageData = canvas.toDataURL('image/jpeg', 0.7); // 70% quality
+      
+      // Set timeout for detection API
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      
+      const response = await fetch(`${BASE_URL}/detect_animal`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: imageData }),
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      
+      const result = await response.json();
+      
+      if (result.error) {
+        console.error("Detection error:", result.error);
+        return;
+      }
+      
+      // Process detections
+      if (result.detections && result.detections.length > 0) {
+        const topDetection = result.detections[0]; // Already sorted by confidence
+        
+        if (topDetection.confidence >= settings.confidenceThreshold) {
+          // Update UI
+          setDetectionStatus({
+            active: true,
+            currentAnimal: formatAnimalName(topDetection.class),
+            confidence: topDetection.confidence,
+            lastDetection: new Date().toLocaleTimeString(),
+            imageData: imageData
+          });
+          
+          // Add to history
+          addToHistory(topDetection);
+          
+          // Show alert
+          addAlert(topDetection);
+          
+          // Trigger deterrent
+          if (settings.enableBuzzer || settings.enableLight || settings.enableSpeaker) {
+            triggerDeterrent(topDetection.class);
+          }
+        }
+      } else {
+        setDetectionStatus(prev => ({ ...prev, active: false, currentAnimal: null }));
+      }
+      
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        console.log('Detection request timeout');
+      } else {
+        console.error("Detection API error:", error);
+      }
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // Start detection loop with proper cleanup
+  const startDetectionLoop = () => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+    }
+    
+    intervalRef.current = setInterval(() => {
+      if (isLive && !isProcessing && videoRef.current && videoRef.current.readyState >= 2) {
+        captureAndDetect();
+      }
+    }, DETECTION_INTERVAL);
+  };
+
+  // Start camera and detection
+  const startDetection = async () => {
+    try {
+      // Request camera access
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { 
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          facingMode: "environment"
+        } 
+      });
+      
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        streamRef.current = stream;
+        await videoRef.current.play();
+        setIsLive(true);
+        setCameraError(null);
+        
+        // Add system message
+        const newAlert = {
+          id: Date.now(),
+          type: "info",
+          message: "Animal detection system activated",
+          time: new Date().toLocaleTimeString(),
+          read: false
+        };
+        setAlerts(prev => [newAlert, ...prev]);
+        
+        // Start detection loop
+        startDetectionLoop();
+      }
+    } catch (err) {
+      console.error("Camera error:", err);
+      setCameraError("Unable to access camera. Please check permissions.");
+      setIsLive(false);
+    }
   };
 
   const stopDetection = () => {
+    // Stop detection loop
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+    
+    // Stop camera stream
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    
     setIsLive(false);
     setDetectionStatus({
       active: false,
       currentAnimal: null,
       confidence: 0,
-      lastDetection: null
+      lastDetection: null,
+      imageData: null
     });
+    setIsProcessing(false);
   };
 
-  const triggerDeterrent = (action) => {
-    alert(`${action} triggered!`);
-    // Add to logs
-    const newDetection = {
-      id: detections.length + 1,
-      timestamp: new Date().toLocaleString(),
-      animal: "Manual Trigger",
-      confidence: 100,
-      action: action,
-      image: null
-    };
-    setDetections([newDetection, ...detections]);
+  const manualTriggerDeterrent = async (action) => {
+    try {
+      await fetch(`${BASE_URL}/trigger_deterrent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          animal: "Manual Trigger",
+          actions: {
+            buzzer: action === "buzzer",
+            light: action === "light",
+            speaker: action === "speaker"
+          }
+        })
+      });
+      
+      // Add to detections
+      const newDetection = {
+        id: Date.now(),
+        timestamp: new Date().toLocaleString(),
+        animal: "🔧 Manual Trigger",
+        confidence: 100,
+        action: `${action.charAt(0).toUpperCase() + action.slice(1)} triggered`,
+        image: null
+      };
+      setDetections(prev => [newDetection, ...prev]);
+      
+    } catch (error) {
+      console.error("Manual trigger error:", error);
+    }
   };
 
   const clearAlerts = () => {
@@ -153,15 +331,56 @@ export default function AnimalDetection() {
   };
 
   const markAlertRead = (id) => {
-    setAlerts(alerts.map(alert =>
+    setAlerts(prev => prev.map(alert =>
       alert.id === id ? { ...alert, read: true } : alert
     ));
   };
 
-  const updateSettings = () => {
-    alert("Settings saved successfully!");
-    // Backend integration will go here
+  const updateSettings = async () => {
+    try {
+      await fetch(`${BASE_URL}/update_detection_settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings)
+      });
+      alert("Settings saved successfully!");
+    } catch (error) {
+      console.error("Failed to save settings:", error);
+      alert("Failed to save settings");
+    }
   };
+
+  // Fetch detection stats from backend
+  useEffect(() => {
+    const fetchStats = async () => {
+      try {
+        const response = await fetch(`${BASE_URL}/detection_stats`);
+        const data = await response.json();
+        if (!data.error) {
+          setStats(data);
+        }
+      } catch (error) {
+        console.error("Failed to fetch stats:", error);
+      }
+    };
+    
+    fetchStats();
+    const interval = setInterval(fetchStats, 30000); // Update every 30 seconds
+    
+    return () => clearInterval(interval);
+  }, []);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+      }
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, []);
 
   return (
     <div className="animal-detection-page">
@@ -177,7 +396,7 @@ export default function AnimalDetection() {
             <span className="title-icon">📹</span>
           </h1>
           <p className="page-description">
-            Real-time animal detection with automatic deterrent system to protect your crops
+            Real-time animal detection with YOLOv8 AI to protect your crops
           </p>
         </div>
         
@@ -196,6 +415,14 @@ export default function AnimalDetection() {
           )}
         </div>
       </div>
+
+      {/* Camera Error Message */}
+      {cameraError && (
+        <div className="camera-error glass-card-animal">
+          <span className="error-icon">⚠️</span>
+          <span className="error-message">{cameraError}</span>
+        </div>
+      )}
 
       {/* Stats Cards */}
       <div className="stats-cards">
@@ -237,22 +464,26 @@ export default function AnimalDetection() {
           <div className="video-container">
             {isLive ? (
               <div className="live-feed">
-                <div className="camera-placeholder">
-                  <div className="camera-icon">📷</div>
-                  <p>Live Camera Feed</p>
-                  {detectionStatus.currentAnimal && (
-                    <div className="detection-overlay">
-                      <div className="detection-box">
-                        <span className="animal-tag">{detectionStatus.currentAnimal}</span>
-                        <span className="confidence-tag">{detectionStatus.confidence}%</span>
-                      </div>
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="camera-video"
+                />
+                <canvas ref={canvasRef} style={{ display: 'none' }} />
+                {detectionStatus.currentAnimal && (
+                  <div className="detection-overlay">
+                    <div className="detection-box">
+                      <span className="animal-tag">{detectionStatus.currentAnimal}</span>
+                      <span className="confidence-tag">{detectionStatus.confidence}%</span>
                     </div>
-                  )}
-                </div>
+                  </div>
+                )}
                 <div className="feed-status">
                   <span className="live-badge">LIVE</span>
-                  <span className="feed-resolution">1280x720</span>
-                  <span className="feed-fps">30 FPS</span>
+                  <span className="feed-resolution">640x480</span>
+                  <span className="feed-fps">~3 FPS</span>
                 </div>
               </div>
             ) : (
@@ -331,15 +562,15 @@ export default function AnimalDetection() {
           
           {/* Deterrent Controls */}
           <div className="deterrent-controls">
-            <h3>🔊 Automatic Deterrent</h3>
+            <h3>🔊 Manual Deterrent</h3>
             <div className="deterrent-buttons">
-              <button className="deterrent-btn buzzer" onClick={() => triggerDeterrent("Buzzer")}>
+              <button className="deterrent-btn buzzer" onClick={() => manualTriggerDeterrent("buzzer")}>
                 🔔 Buzzer
               </button>
-              <button className="deterrent-btn light" onClick={() => triggerDeterrent("Light")}>
+              <button className="deterrent-btn light" onClick={() => manualTriggerDeterrent("light")}>
                 💡 Light
               </button>
-              <button className="deterrent-btn speaker" onClick={() => triggerDeterrent("Speaker")}>
+              <button className="deterrent-btn speaker" onClick={() => manualTriggerDeterrent("speaker")}>
                 🔊 Speaker
               </button>
             </div>
@@ -493,7 +724,7 @@ export default function AnimalDetection() {
                   <td>{detection.action}</td>
                   <td>
                     {detection.image ? (
-                      <button className="view-image-btn">View</button>
+                      <button className="view-image-btn" onClick={() => window.open(detection.image)}>View</button>
                     ) : (
                       <span className="no-image">-</span>
                     )}
@@ -502,45 +733,6 @@ export default function AnimalDetection() {
               ))}
             </tbody>
           </table>
-        </div>
-      </div>
-
-      {/* Animal Statistics */}
-      <div className="statistics-section glass-card-animal">
-        <h2 className="section-title">📈 Animal Activity Statistics</h2>
-        <div className="animal-stats">
-          <div className="animal-stat-item">
-            <span className="animal-emoji">🐄</span>
-            <span className="animal-name">Cows</span>
-            <div className="stat-bar">
-              <div className="stat-fill" style={{ width: '45%' }}></div>
-            </div>
-            <span className="stat-count">21 detections</span>
-          </div>
-          <div className="animal-stat-item">
-            <span className="animal-emoji">🐐</span>
-            <span className="animal-name">Goats</span>
-            <div className="stat-bar">
-              <div className="stat-fill" style={{ width: '32%' }}></div>
-            </div>
-            <span className="stat-count">15 detections</span>
-          </div>
-          <div className="animal-stat-item">
-            <span className="animal-emoji">🐕</span>
-            <span className="animal-name">Dogs</span>
-            <div className="stat-bar">
-              <div className="stat-fill" style={{ width: '23%' }}></div>
-            </div>
-            <span className="stat-count">11 detections</span>
-          </div>
-          <div className="animal-stat-item">
-            <span className="animal-emoji">🐗</span>
-            <span className="animal-name">Wild Boars</span>
-            <div className="stat-bar">
-              <div className="stat-fill" style={{ width: '0%' }}></div>
-            </div>
-            <span className="stat-count">0 detections</span>
-          </div>
         </div>
       </div>
     </div>

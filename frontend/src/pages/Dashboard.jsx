@@ -2,16 +2,21 @@ import React, { useEffect, useRef, useState } from "react";
 import Chart from "chart.js/auto";
 import "../styles/Dashboard.css";
 
+const BASE_URL = process.env.REACT_APP_API_URL || "http://10.0.11.114:5000"; // Updated to your Laptop IP
+
 export default function Dashboard() {
   const [data, setData] = useState({
     temperature: 0,
     humidity: 0,
     soil_moisture: 0,
     irrigation_needed: 0,
-    mode: "AUTO"
+    mode: "AUTO",
+    confidence: null,
+    reason: [],
+    timestamp: 0
   });
 
-  const [connectionStatus, setConnectionStatus] = useState(true);
+  const [connectionStatus, setConnectionStatus] = useState(false);
   const [lastUpdate, setLastUpdate] = useState(new Date());
   const [showNotification, setShowNotification] = useState(false);
   const [notificationMessage, setNotificationMessage] = useState("");
@@ -22,6 +27,7 @@ export default function Dashboard() {
   const soundRef = useRef(null);
 
   useEffect(() => {
+    // Initialize Chart.js
     chartInstance.current = new Chart(chartRef.current, {
       type: 'line',
       data: {
@@ -30,8 +36,8 @@ export default function Dashboard() {
           {
             label: 'Soil Moisture',
             data: [],
-            borderColor: '#22c55e',
-            backgroundColor: 'rgba(34,197,94,0.2)',
+            borderColor: '#3b82f6',
+            backgroundColor: 'rgba(59,130,246,0.2)',
             tension: 0.4,
             fill: true,
             borderWidth: 2,
@@ -52,8 +58,8 @@ export default function Dashboard() {
           {
             label: 'Humidity',
             data: [],
-            borderColor: '#3b82f6',
-            backgroundColor: 'rgba(59,130,246,0.2)',
+            borderColor: '#8b5cf6',
+            backgroundColor: 'rgba(139,92,246,0.2)',
             tension: 0.4,
             fill: true,
             borderWidth: 2,
@@ -116,9 +122,7 @@ export default function Dashboard() {
 
     return () => {
       clearInterval(interval);
-      if (chartInstance.current) {
-        chartInstance.current.destroy();
-      }
+      if (chartInstance.current) chartInstance.current.destroy();
     };
   }, []);
 
@@ -128,52 +132,66 @@ export default function Dashboard() {
     setTimeout(() => setShowNotification(false), 3000);
   };
 
-  const updateDashboard = () => {
-    fetch("http://127.0.0.1:5000/latest")
-      .then(res => {
-        if (!res.ok) {
-          throw new Error('Network response was not ok');
+  // ✅ SIMPLIFIED: Removed blocking timestamp logic
+  const updateDashboard = async () => {
+    try {
+      const res = await fetch(`${BASE_URL}/latest`);
+      if (!res.ok) throw new Error("API error");
+
+      const d = await res.json();
+
+      console.log("DATA:", d); // 🔥 DEBUG - Check what's coming from backend
+
+      // ❗ REMOVE STRICT BLOCKING - Only validate essential fields
+      if (
+        d.temperature === undefined ||
+        d.humidity === undefined ||
+        d.soil_moisture === undefined
+      ) {
+        throw new Error("Invalid data");
+      }
+
+      // ✅ ALWAYS UPDATE DATA (NO BLOCK)
+      setData(d);
+      setLastUpdate(new Date());
+      setConnectionStatus(true);
+
+      // 🔥 FORCE CHART UPDATE
+      let chart = chartInstance.current;
+      if (chart) {
+        let timeLabel = new Date().toLocaleTimeString();
+
+        chart.data.labels.push(timeLabel);
+        chart.data.datasets[0].data.push(d.soil_moisture || 0);
+        chart.data.datasets[1].data.push(d.temperature || 0);
+        chart.data.datasets[2].data.push(d.humidity || 0);
+
+        if (chart.data.labels.length > 15) {
+          chart.data.labels.shift();
+          chart.data.datasets.forEach(ds => ds.data.shift());
         }
-        return res.json();
-      })
-      .then(d => {
-        setData(d);
-        setConnectionStatus(true);
-        setLastUpdate(new Date());
 
-        let chart = chartInstance.current;
-        if (chart) {
-          let time = new Date().toLocaleTimeString();
-          
-          chart.data.labels.push(time);
-          chart.data.datasets[0].data.push(d.soil_moisture);
-          chart.data.datasets[1].data.push(d.temperature);
-          chart.data.datasets[2].data.push(d.humidity);
+        chart.update();
+      }
 
-          if (chart.data.labels.length > 15) {
-            chart.data.labels.shift();
-            chart.data.datasets.forEach(ds => ds.data.shift());
-          }
-
-          chart.update();
+      // ALERT for irrigation needed
+      if (d.irrigation_needed === 1 && previousState.current === 0) {
+        if (soundRef.current) {
+          soundRef.current.play().catch(() => {});
         }
+        showAlert("💧 Irrigation needed!", "warning");
+      }
 
-        if (d.irrigation_needed === 1 && previousState.current === 0) {
-          soundRef.current.play();
-          showAlert("💧 Irrigation needed! System activated.", "warning");
-        }
+      previousState.current = d.irrigation_needed;
 
-        previousState.current = d.irrigation_needed;
-      })
-      .catch(err => {
-        console.error("Error fetching data:", err);
-        setConnectionStatus(false);
-        showAlert("⚠️ Connection lost. Retrying...", "error");
-      });
+    } catch (err) {
+      console.error("Fetch error:", err);
+      setConnectionStatus(false);
+    }
   };
 
   const toggleMode = (v) => {
-    fetch("http://127.0.0.1:5000/set_mode", {
+    fetch(`${BASE_URL}/set_mode`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mode: v ? "MANUAL" : "AUTO" })
@@ -188,7 +206,7 @@ export default function Dashboard() {
   };
 
   const setManual = (v) => {
-    fetch("http://127.0.0.1:5000/set_manual", {
+    fetch(`${BASE_URL}/set_manual`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ state: v })
@@ -202,10 +220,11 @@ export default function Dashboard() {
       });
   };
 
+  // Status Helpers
   const getSoilMoistureStatus = (value) => {
     if (value < 30) return { text: "Dry", color: "#ef4444", icon: "🔥" };
     if (value < 60) return { text: "Normal", color: "#f59e0b", icon: "💧" };
-    return { text: "Optimal", color: "#22c55e", icon: "🌊" };
+    return { text: "Optimal", color: "#3b82f6", icon: "🌊" };
   };
 
   const getTemperatureStatus = (value) => {
@@ -226,10 +245,8 @@ export default function Dashboard() {
 
   return (
     <div className="dashboard-page">
-      {/* Glass Background Effect */}
       <div className="glass-bg-dashboard"></div>
       
-      {/* Notification */}
       {showNotification && (
         <div className={`notification ${notificationMessage.includes("error") ? 'error' : notificationMessage.includes("warning") ? 'warning' : 'success'}`}>
           <span className="notification-icon">
@@ -239,7 +256,6 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Header */}
       <div className="dashboard-header glass-card-dashboard">
         <div className="header-content">
           <h1 className="dashboard-title">
@@ -254,7 +270,7 @@ export default function Dashboard() {
         
         <div className="connection-status">
           <div className={`status-dot ${connectionStatus ? 'online' : 'offline'}`}></div>
-          <span className="status-text">{connectionStatus ? 'Connected' : 'Disconnected'}</span>
+          <span className="status-text">{connectionStatus ? '🟢 Live Data' : '🔴 System Offline'}</span>
           <div className="last-update">
             <span className="update-icon">🕐</span>
             <span className="update-text">{lastUpdate.toLocaleTimeString()}</span>
@@ -262,7 +278,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Sensor Cards */}
       <div className="sensors-grid">
         <div className="sensor-card glass-card-dashboard">
           <div className="sensor-icon temp-icon">🌡️</div>
@@ -333,7 +348,76 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Mode Control */}
+      {/* AI Prediction Details Card */}
+      {data.mode === "AUTO" && data.confidence !== null && (
+        <div className="ai-insights glass-card-dashboard">
+          <div className="insights-header">
+            <span className="insights-icon">🤖</span>
+            <span className="insights-title">AI Decision Insights</span>
+            <span className="insights-badge">Powered by AI</span>
+          </div>
+
+          <div className="insights-content">
+            <div className="ai-decision">
+              <div className="decision-label">Irrigation Status</div>
+              <div className={`decision-value ${data.irrigation_needed ? 'active' : 'inactive'}`}>
+                {data.irrigation_needed ? (
+                  <>
+                    <span className="decision-icon">💧</span>
+                    ON
+                  </>
+                ) : (
+                  <>
+                    <span className="decision-icon">🌿</span>
+                    OFF
+                  </>
+                )}
+              </div>
+            </div>
+
+            <div className="confidence-score">
+              <div className="confidence-label">
+                <span className="label-icon">📊</span>
+                Confidence Score
+              </div>
+              <div className="confidence-value">
+                <div className="confidence-bar">
+                  <div
+                    className="confidence-fill"
+                    style={{
+                      width: `${data.confidence * 100}%`,
+                      background: `linear-gradient(90deg, 
+                        ${data.confidence > 0.7 ? '#3b82f6' : data.confidence > 0.4 ? '#8b5cf6' : '#ef4444'} 0%, 
+                        ${data.confidence > 0.7 ? '#60a5fa' : data.confidence > 0.4 ? '#a78bfa' : '#f87171'} 100%)`
+                    }}
+                  ></div>
+                </div>
+                <span className="confidence-percent">
+                  {(data.confidence * 100).toFixed(1)}%
+                </span>
+              </div>
+            </div>
+
+            {data.reason && data.reason.length > 0 && (
+              <div className="reasons">
+                <div className="reasons-label">
+                  <span className="label-icon">💡</span>
+                  Why AI decided this:
+                </div>
+                <ul className="reasons-list">
+                  {data.reason.map((r, index) => (
+                    <li key={index} className="reason-item">
+                      <span className="reason-bullet">•</span>
+                      <span className="reason-text">{r}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="mode-control glass-card-dashboard">
         <div className="mode-header">
           <span className="mode-icon">🎮</span>
@@ -366,7 +450,6 @@ export default function Dashboard() {
         )}
       </div>
 
-      {/* Chart Section */}
       <div className="chart-section glass-card-dashboard">
         <div className="chart-header">
           <span className="chart-icon">📊</span>
@@ -378,7 +461,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Quick Stats */}
       <div className="quick-stats glass-card-dashboard">
         <div className="stat-item">
           <div className="stat-icon">⏱️</div>
@@ -410,7 +492,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Audio for alert */}
       <audio ref={soundRef}>
         <source src="https://www.soundjay.com/nature/water-drip-1.mp3" type="audio/mpeg" />
       </audio>
