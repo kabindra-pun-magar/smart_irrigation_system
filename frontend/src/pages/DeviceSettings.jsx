@@ -53,10 +53,31 @@ export default function DeviceSettings() {
 
   const daysOfWeek = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-  const handleWifiSubmit = (e) => {
+  const handleWifiSubmit = async (e) => {
     e.preventDefault();
-    alert("WiFi configuration sent to device!");
-    // Backend integration will go here
+
+    try {
+      const response = await fetch("http://10.0.11.114:5000/set_wifi", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          ssid: wifiConfig.ssid,
+          password: wifiConfig.password
+        })
+      });
+
+      if (response.ok) {
+        alert("WiFi configuration sent to device successfully!");
+      } else {
+        alert("Failed to send WiFi configuration to device");
+      }
+
+    } catch (err) {
+      console.error("Error sending WiFi config:", err);
+      alert("Failed to connect to server. Please check if the backend is running.");
+    }
   };
 
   const handleCalibrationUpdate = () => {
